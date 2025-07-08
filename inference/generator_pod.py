@@ -186,22 +186,20 @@ if __name__ == '__main__':
     SPEAKER_PROMPTS = {
         "speaker_a": {
             "text": (
-                "He was such a big boy that he wore high boots and carried a jack knife. He gazed and "
-                "gazed at the cap, and could not keep from fingering the blue tassel."
+                "Perhaps she may have a relation who might suit us, and be glad of our place."
             ),
-            "audio": "/root/code2/CSM_v2/read_speech_b.wav",
+            "audio": "/mnt/users/hccl.local/jkzhao/projects/ConversationTTS/egs/pretraining/1688_142285_000059_000000.wav",
         },
         "speaker_b": {
             "text": (
-                "like a super Mario level. Like it's very like high detail. And like, once you get "
-                "into the park"
+                "The whole assembly wore an aspect of the most profound gravity-- the reflection, as it were, of the sombre countenance of the austere and relentless Grand Master."
             ),
-            "audio": "/root/code2/CSM_v2/conversational_b_10s.wav",
+            "audio": "/mnt/users/hccl.local/jkzhao/projects/ConversationTTS/egs/pretraining/8461_281231_000052_000000.wav",
         }
     }
-    resume = 'exp_data/speech_lm/exp_v3/ep3.checkpoint'
+    resume = '/mnt/users/hccl.local/jkzhao/ckpts/ckpt1.checkpoint'
     exp_dir = 'exp_data/speech_lm/exp_v3'
-    device = 'cuda:3'
+    device = 'cuda:0'
     config = ModelArgs(
         backbone_flavor="llama-1B",
         decoder_flavor="llama-100M",
@@ -212,8 +210,8 @@ if __name__ == '__main__':
     model = Model(config)
     model.to(device=device, dtype=torch.bfloat16)
     resume_for_inference(resume, exp_dir, model, device) # init the model
-    generator = Generator(model, text_tokenizer_path='checkpoints/llama3_2',
-                          audio_tokenizer_path = 'checkpoints/moshi/tokenizer-e351c8d8-checkpoint125.safetensors')
+    generator = Generator(model, text_tokenizer_path='/mnt/users/hccl.local/jkzhao/.cache/huggingface/hub/models--meta-llama--Llama-3.2-3B/snapshots/13afe5124825b4f3751f836b40dafda64c1ed062',
+                          audio_tokenizer_path = '/mnt/users/hccl.local/jkzhao/projects/moshi/moshiko-pytorch-bf16/tokenizer-e351c8d8-checkpoint125.safetensors')
 
     # Prepare speaker prompts
     speaker_a_prompt = prepare_prompt(

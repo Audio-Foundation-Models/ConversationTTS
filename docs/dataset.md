@@ -1,34 +1,39 @@
 ## Main idea
 
-
-## 0. Environment Set up
+## 0. Environment Setup
 You must use python>=3.10
 
 >1.install python and cuda
 
 >2.install packages
-
 ```
-conda create -y -n RSTnet python=3.12 
+conda create -y -n RSTnet python=3.9 
 conda activate RSTnet
+
+cd egs/pretraining/data_scripts/emilia
 bash env.sh
 ```
-
 >3.Manually download the checkpoints of UVR-MDX-NET-Inst_HQ_3 [UVR-MDX-NET-Inst_3.onnx](https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Inst_HQ_3.onnx) and DNSMOS P.835 [sig_bak_ovr.onnx](https://github.com/microsoft/DNS-Challenge/blob/master/DNSMOS/DNSMOS/sig_bak_ovr.onnx), then save their path for the next step configuration (i.e. #2 and #3 TODO).
+
 >4.Creat the access token to pyannote/speaker-diarization-3.1 following the [guide](https://huggingface.co/pyannote/speaker-diarization-3.1#requirements), then save it for the next step configuration.
+
 >Make sure you have stable connection to GitHub and HuggingFace. The checkpoints of Silero and Whisperx-medium will be downloaded automatically on the pipeline's first run.
 
 ## 1. Data Preparation
 
 
 ### 1.1 Broadcast Data
-This Data processing methodology derived from Emilia with some modifications
+This Data processing methodology derived from Emilia with some modifications.
 The Pipeline includes the following major steps:
+
 Standardization：Audio normalization
+
 Speaker Diarization: Get medium-length single-speaker speech data
+
 ASR: Get transcriptions of the speech segments
+
 Filtering: Obtain the final processed dataset
-3.Download the model files from the third-party repositories.
+
 #### 1.Config File
 
 The config.json can be found at `data_scripts/emilia`. Make sure RSTnet environments are ready.
@@ -88,13 +93,11 @@ db_root=<path-to-source-wavs>
 processed_metadata_root=<path-to-dump-metadata>
 processed_audio_root=<path-to-dump-processed-audio>
 ```
-
 2. set `conda.sh` and `PYTHONPATH` to initial your conda environment correctly.
 ```bash
 source <conda-dir>/etc/profile.d/conda.sh
 export PYTHONPATH=$PYTHONPATH:<path-to-RSTnet/MLLM_v2>
 ```
-
 3. set other parameters like `checkpoint_dir` and `max_duration` with the value you like.
 ```bash
 --checkpoint_dir <path-to-pretrained-LLM>
@@ -110,7 +113,6 @@ export PYTHONPATH=$PYTHONPATH:<path-to-RSTnet/MLLM_v2>
                                                                          <semantic_tokens>···
                                                                          <acoustic_tokens>···
 ```
-
 In the last stage, we provide codes for dataloader sainity check. If all things works fine, it will output the text stream in the terminal and the audio stream as a .wav file under `egs/pretraining/data_scripts`. Just check if they are aligned.
 
 #### 3. Check Intermediate Result

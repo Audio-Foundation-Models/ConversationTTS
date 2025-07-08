@@ -157,11 +157,7 @@ class SileroVAD:
 
             temp_audio = audio_data[start_frame:end_frame]
 
-            # resample from 24k to 16k
-            temp_audio_resampled = librosa.resample(
-                temp_audio, orig_sr=sampling_rate, target_sr=SAMPLING_RATE
-            )
-
+            temp_audio_resampled = temp_audio
             for start_frame_sub, end_frame_sub in self.segment_speech(
                 temp_audio_resampled,
                 int(start * SAMPLING_RATE),

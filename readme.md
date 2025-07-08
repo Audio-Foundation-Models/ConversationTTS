@@ -24,7 +24,7 @@ Install and Run CapSpeech locally.
 Please refer to the following documents to prepare the data, train the model, and evaluate its performance.
 - [Data Preparation](docs/dataset.md)  
 - [Training](docs/training.md)  
-- [Evaluation](capspeech/eval/README.md)  
+- [Evaluation](capspeech/eval/README.md)  (Developing...)
 
 ## Main Contributors
 

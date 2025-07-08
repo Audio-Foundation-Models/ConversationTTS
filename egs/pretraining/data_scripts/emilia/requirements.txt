@@ -4,4 +4,11 @@ tqdm
 pydub
 pyannote.audio
 pandas
+matplotlib
+omegaconf 
+einops
+vector_quantize_pytorch
+tensorboard
+deepspeed
+peft
 git+https://github.com/m-bain/whisperx.git # needs torch >= 2.0.0
