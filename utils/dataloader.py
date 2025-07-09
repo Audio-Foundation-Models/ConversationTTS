@@ -75,7 +75,6 @@ def build_data_iterator(
             batch_size=1,
             sampler=sampler,
             num_workers=n_worker,
-            # prefetch_factor=min(100, len(batches)),
             collate_fn=collate_fn,
         )
     return iterator
@@ -280,21 +279,12 @@ class Collate_Fn_Factory(object):
         start =  0
         task = d['task']
         if task == 'text_only': # not used now 
-            # this_data = self.tokenizers['text'].tokenize2(d['text_seq'])
-            # # print('text-only ', this_data, this_data.shape)
-            # this_data = self.text_pad(this_data)
-            # this_weight = torch.ones((self.parallel_number, this_data.shape[1]))
-            # this_weight[1:,:] = this_weight[1:,:]*(1/(this_data.shape[1]*8)) # reduce the weight for these empty tokens
             print('not implement now')
             assert 1==2
 
         elif task == 'audio_only': # not used now 
             print('not implement now')
             assert 1==2
-            # this_data = self.tokenizers['audio'].tokenize2(d['audio_seq'])
-            # this_data = self.audio_pad(this_data)
-            # this_weight = torch.ones((self.parallel_number, this_data.shape[1]))
-            # this_weight[0,:] = 1/this_data.shape[1] # reduce the weight for these empty tokens
         
         elif task == 'moshi':   # now for sentence level text-audio interleaved
             this_data = d['hybrid_seq'].to(torch.int64).transpose(0, 1)  # [N, T] -> [T, N]
@@ -307,8 +297,6 @@ class Collate_Fn_Factory(object):
             this_mask[this_data==self.semantic_pad_token] = False
             this_mask[this_data==self.text_pad_token] = False
             this_mask[zero_row_indices_torch,:-1] = True # we should set the stop token as true for training
-            # print('this_mask ', this_mask)
-            # assert 1==2
         
         elif task == 'musicllm_v1' or task == 'speechllm_v1':
             this_text_data = self.tokenizers['text'].tokenize2(d['text_seq'])
@@ -316,21 +304,13 @@ class Collate_Fn_Factory(object):
             this_audio_data = self.tokenizers['audio'].tokenize2(d['audio_seq'])
             eos_frame = torch.ones(1, this_audio_data.shape[1])*self.semantic_eos # add eos tokens
             this_audio_data = torch.cat([this_audio_data, eos_frame], dim=0) # (T+1,4)
-            # print('this_audio_data ', this_audio_data.shape, this_audio_data) # T, 4
-            # assert 1==2
 
             this_text_data = self.text_pad(this_text_data)
             this_text_mask = torch.zeros((this_text_data.shape[0], self.parallel_number))
             this_text_mask[:,-1] = True
-            # print('this_text_data ', this_text_data, this_text_data.shape)
-            # print('this_text_mask ', this_text_mask, this_text_mask.shape)
-            # assert 1==2
             this_audio_data = self.audio_pad(this_audio_data)
             this_audio_mask = torch.zeros((this_audio_data.shape[0], self.parallel_number))
             this_audio_mask[:,:-1] = True 
-            # print('this_audio_data ', this_audio_data, this_audio_data.shape)
-            # print('this_audio_mask ', this_audio_mask, this_audio_mask.shape)
-            # assert 1==2
             this_data = torch.cat([this_text_data, this_audio_data], dim=0) # combine along time
             this_mask = torch.cat([this_text_mask, this_audio_mask], dim=0)
             
@@ -354,10 +334,7 @@ class Collate_Fn_Factory(object):
         for idx, (example_id, d) in enumerate(batch):
             task_format = task_formats[d['task']]
             sequence, mask, length = self.splice_sequence(d, task_format['keys'], task_format['type'], task_format['loss_key'])
-            # print('sequence ', sequence)
-            # print('self.text_pad_token  ', self.text_pad_token, mask.shape)
-            # print('mask ', mask)
-            # assert 1==2
+
             sequences[idx, :sequence.shape[0], :] = sequence
             masks[idx, :mask.shape[0], :] = mask # we donot calculate loss for PADING part
             lengths.append(length)
@@ -366,8 +343,7 @@ class Collate_Fn_Factory(object):
         sequences = sequences[:, :max(lengths), :].long() # 
         masks = masks[:, :max(lengths), :]
         lengths = torch.Tensor(lengths).long()
-        # print('sequences ', sequences)
-        # assert 1==2
+
         return sequences, masks, lengths, example_ids
 
     def __call__(self, batch):
@@ -378,6 +354,7 @@ class Collate_Fn_Factory(object):
 def get_data_iterator_tokenizer_vocabulary(
         args,
         train_jsons,
+        valid_jsons,
         batch_scale=3000,
         delay_step=1,
         minibatch_debug=-1,
@@ -403,15 +380,15 @@ def get_data_iterator_tokenizer_vocabulary(
     logging.info(f"loading train: {train_jsons}")
     train_data_dict, train_text_dict = load_data_for_all_tasks(train_jsons)
     # print('train_data_dict ', len(train_data_dict.keys()), len(train_text_dict.keys()))
-    #logging.info(f"loading valid:  {valid_jsons}")
-    #valid_data_dict, valid_text_dict = load_data_for_all_tasks(valid_jsons)
+    logging.info(f"loading valid:  {valid_jsons}")
+    valid_data_dict, valid_text_dict = load_data_for_all_tasks(valid_jsons)
     # print('train_data_dict ', len(valid_data_dict.keys()), len(valid_text_dict.keys()))
     tokenizers = {}
     if args.audio_tokenizer is not None and args.audio_tokenizer != "none":
         if args.audio_tokenizer == "semantic":
             audio_tokenizer = None
         elif args.audio_tokenizer == 'mimi':
-            audio_tokenizer = MimiTokenizer(ckpt_path=args.mimi_codec_path)
+            audio_tokenizer = MimiTokenizer()
         else:
             raise NotImplementedError(args.audio_tokenizer)
         tokenizers['audio'] = audio_tokenizer
@@ -420,7 +397,7 @@ def get_data_iterator_tokenizer_vocabulary(
         logging.info(f"Did not build audio tokenizer: {args.audio_tokenizer}")
     if args.text_tokenizer is not None and args.text_tokenizer != "none":
         if args.text_tokenizer == 'llama3-8B' or args.text_tokenizer == 'qwen':
-            text_tokenizer = TextTokenizer(args.checkpoint_path)
+            text_tokenizer = TextTokenizer(os.path.dirname(args.checkpoint_path))
         else:
             raise NotImplementedError(args.text_tokenizer)
         tokenizers['text'] = text_tokenizer
@@ -428,24 +405,24 @@ def get_data_iterator_tokenizer_vocabulary(
         text_tokenizer = None
         logging.info(f"Did not build audio tokenizer: {args.text_tokenizer}")
     # (2) build data iterator
-    # valid_iterator = build_data_iterator(
-    #     valid_data_dict,
-    #     tokenizers,
-    #     delay_step=delay_step, 
-    #     max_length=max_length,
-    #     min_length=min_length,
-    #     batch_scale=batch_scale,
-    #     is_train=False,
-    #     n_worker=n_worker,
-    #     seed=seed,
-    #     minibatch_debug=minibatch_debug,
-    #     parallel_number = parallel_number,
-    #     text_empty_token = text_empty_token,
-    #     semantic_empty_token = semantic_empty_token,
-    #     semantic_pad_token = semantic_pad_token,
-    #     semantic_eos = semantic_eos,
-    #     text_pad_token = text_pad_token,
-    # )
+    valid_iterator = build_data_iterator(
+        valid_data_dict,
+        tokenizers,
+        delay_step=delay_step, 
+        max_length=max_length,
+        min_length=min_length,
+        batch_scale=batch_scale,
+        is_train=False,
+        n_worker=n_worker,
+        seed=seed,
+        minibatch_debug=minibatch_debug,
+        parallel_number = parallel_number,
+        text_empty_token = text_empty_token,
+        semantic_empty_token = semantic_empty_token,
+        semantic_pad_token = semantic_pad_token,
+        semantic_eos = semantic_eos,
+        text_pad_token = text_pad_token,
+    )
     train_iterator = build_data_iterator(
         train_data_dict, 
         tokenizers,
@@ -465,7 +442,7 @@ def get_data_iterator_tokenizer_vocabulary(
         text_pad_token = text_pad_token
     )
     logging.info('all iterator built')
-    return train_iterator
+    return train_iterator, valid_iterator
 
 if __name__ == "__main__":
     # get_data_iterator_tokenizer_vocabulary(sys.argv[1:2], sys.argv[2:3], n_worker=1) 
@@ -502,6 +479,8 @@ if __name__ == "__main__":
         else:
             raise NotImplementedError(args.text_tokenizer)
 
+
+
     for i, batch in enumerate(train_iter):
         if i > 10:
             break
@@ -512,9 +491,8 @@ if __name__ == "__main__":
         audio = audio_tokenizer.detokenize(batch[0][0, :length, :-1].T)
         print(f"ID: {utt_id}, Text: {text}")
         torchaudio.save(f'{utt_id}_out.wav', audio, 24000)
-
-        import pdb; pdb.set_trace()
         print(batch)
+
     for i, batch in enumerate(valid_iter):
         if i > 10:
             break
@@ -525,7 +503,5 @@ if __name__ == "__main__":
         audio = audio_tokenizer.detokenize(batch[0][0, :length, :-1].T)
         print(f"ID: {utt_id}, Text: {text}")
         torchaudio.save(f'{utt_id}_out.wav', audio, 24000)
-
-        import pdb; pdb.set_trace()
         print(batch)
         

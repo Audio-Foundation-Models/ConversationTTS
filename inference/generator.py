@@ -21,6 +21,8 @@ from models.model_new import Model, ModelArgs
 from tools.tokenizer.Text2ID.text_tokenizer import TextTokenizer
 from tools.tokenizer.MimiCodec.mimi_tokenizer import MimiTokenizer
 from utils.train_utils import resume_for_inference
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_flash_sdp(False)
 
 @dataclass
 class Segment:
@@ -43,6 +45,16 @@ def load_text_tokenizer(tokenizer_checkpoint_path):
 def load_audio_tokenizer(model_path, device):
     return MimiTokenizer(ckpt_path=model_path, device=device)
 
+def load_prompt_audio(audio_path):
+    audio_tensor, sample_rate = torchaudio.load(audio_path)
+    audio_tensor = audio_tensor.squeeze(0)
+    if sample_rate != 24000:
+        audio_tensor = torchaudio.functional.resample(audio_tensor, orig_freq=sample_rate, new_freq=24000)
+    return audio_tensor # T
+
+def prepare_prompt(text, audio_path, segment_id=1):
+    audio_tensor = load_prompt_audio(audio_path)
+    return Segment(text=text, segment_id=segment_id, audio=audio_tensor)
 
 class Generator:
     def __init__(
@@ -87,7 +99,7 @@ class Generator:
 
         # (K, T)
         audio = audio.to(self.device)
-        audio_tokens = self._audio_tokenizer.encode(audio.unsqueeze(0).unsqueeze(0))[0]
+        audio_tokens = self._audio_tokenizer.encode(audio.unsqueeze(0).unsqueeze(0))
         # add EOS frame
         eos_frame = torch.zeros(audio_tokens.size(0), 1).to(self.device) # eos is zero?
         
@@ -110,7 +122,7 @@ class Generator:
         Returns:
             (seq_len, 33), (seq_len, 33)
         """
-        text_tokens, text_masks = self._tokenize_text_segment(f'[{str(segment.speaker)}]'+segment.text)
+        text_tokens, text_masks = self._tokenize_text_segment(f'[{str(segment.segment_id)}]'+segment.text)
         audio_tokens, audio_masks = self._tokenize_audio(segment.audio)
         # 
         return torch.cat([text_tokens, audio_tokens], dim=0), torch.cat([text_masks, audio_masks], dim=0)
@@ -121,7 +133,7 @@ class Generator:
         text: str,
         speaker: int = 0,
         max_audio_length_ms: float = 30_000,
-        context: List[Segment],
+        context: List[Segment] = [],
         temperature: float = 0.9,
         topk: int = 30,
     ) -> torch.Tensor:
@@ -172,9 +184,9 @@ class Generator:
 
 
 if __name__ == '__main__':
-    resume = 'exp_data/speech_lm/exp_v3/ep2.checkpoint'
+    resume = '/mnt/users/hccl.local/jkzhao/ckpts/ckpt1.checkpoint'
     exp_dir = 'exp_data/speech_lm/exp_v3'
-    device = 'cuda:3'
+    device = 'cuda:6'
     config = ModelArgs(
         backbone_flavor="llama-1B",
         decoder_flavor="llama-100M",
@@ -185,12 +197,25 @@ if __name__ == '__main__':
     model = Model(config)
     model.to(device=device, dtype=torch.bfloat16)
     resume_for_inference(resume, exp_dir, model, device) # init the model
-    generator = Generator(model, text_tokenizer_path='checkpoints/llama3_2',
-                          audio_tokenizer_path = 'checkpoints/moshi/tokenizer-e351c8d8-checkpoint125.safetensors')
+    generator = Generator(model, text_tokenizer_path='/mnt/users/hccl.local/jkzhao/.cache/huggingface/hub/models--meta-llama--Llama-3.2-3B/snapshots/13afe5124825b4f3751f836b40dafda64c1ed062',
+                          audio_tokenizer_path = '/mnt/users/hccl.local/jkzhao/projects/moshi/moshiko-pytorch-bf16/tokenizer-e351c8d8-checkpoint125.safetensors')
 
-    
+    # Prepare speaker prompts
+    SPEAKER_PROMPTS = {
+        "text": (
+            "你可不可以原諒我啊？"
+        ),
+        "audio": "/mnt/users/hccl.local/jkzhao/projects/ConversationTTS/egs/pretraining/yueyu_1_common_voice_yue_40240209.wav",
+    }
+    speaker_prompt = prepare_prompt(
+        SPEAKER_PROMPTS["text"],
+        SPEAKER_PROMPTS["audio"],
+        segment_id=1
+    )
+    prompt_segments = [speaker_prompt]
+
     text = "[1]SPHERE 係一個自我進化嘅框架，專門用嚟提升小型語言模型（SLMs）嘅多步推理能力。佢可以喺無需人手監督嘅情況下，自動生成高質素嘅偏好數據。SPHERE 利用蒙地卡羅樹搜尋（MCTS）嚟高效探索推理路徑，同時用一個基於過程嘅獎勵模型（reward model）對每一步嘅正確性打分。"
-    wav = generator.generate_v1(text=text)
+    wav = generator.generate_v1(text=text, context=prompt_segments)
     torchaudio.save('v_cn1.wav', wav.detach().cpu(), sample_rate=24000)
 
 

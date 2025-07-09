@@ -1,33 +1,49 @@
-stage=1
+stage=7
 stop_stage=7
-ngpu=2
+ngpu=32
 
-db_root=/mnt/users/hccl.local/jkzhao/data/fisher
-processed_metadata_root=/mnt/users/hccl.local/jkzhao/projects/CSM/debug_data
-processed_audio_root=/mnt/users/hccl.local/jkzhao/projects/CSM/debug_data_processed
 
-export CUDA_VISIBLE_DEVICES=6,7
+db_root=/mnt/file-201-user-disk-m/cpii.local/dcyang/zjk/data/podcast/podcast
+
+processed_metadata_root=/mnt/file-201-data-disk-m/cpii.local/dcyang/processed/podcast_metadata
+processed_audio_root=/mnt/file-201-data-disk-m/cpii.local/dcyang/processed/podcast_data_processed
+
+
+export CUDA_VISIBLE_DEVICES=2,7
 available_gpus=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 echo "Available GPUs: $available_gpus"
 
-source /mnt/users/hccl.local/jkzhao/softwares/miniconda3/etc/profile.d/conda.sh
-conda activate AudioPipeline
-export PYTHONPATH=$PYTHONPATH:/mnt/users/hccl.local/jkzhao/projects/CSM
+# conda init bash
+source /mnt/file-201-user-disk-m/cpii.local/dcyang/zjk/softwares/miniconda3/etc/profile.d/conda.sh
+
+conda activate RSTnet
+export PYTHONPATH=$PYTHONPATH:/mnt/file-201-user-disk-m/cpii.local/dcyang/zjk/projects/CSM
 
 mkdir -p $processed_metadata_root
-wav_scp=$processed_metadata_root/wav.scp; [[ -f "$wav_scp" ]] && rm $wav_scp
+wav_scp=$processed_metadata_root/wav.scp;
 
 # Prepare wav.scp
 if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
-    echo "Prepare Fisher dataset"
-    find "${db_root}" -type f -name "*.wav" | while read -r wav_file; do
-        id=$(basename $wav_file .wav)
-        echo "$id $wav_file" >> $wav_scp
+    [[ -f "$wav_scp" ]] && rm $wav_scp
+    echo "Prepare RSTnet dataset"
+    id=0
+    find . "${db_root}" -type f -name "*.mp3" | while read -r wav_file; do
+        if [[ $wav_file =~ \([0-9]+\)\.mp3$ ]]; then 
+            continue
+        else
+            echo -e "$id\t$wav_file" >> $wav_scp
+            id=$((id + 1))
+        fi
     done
-    # For debugging, only use the first 3 lines
-    mv $wav_scp ${wav_scp}.tmp
-    head -n 3 ${wav_scp}.tmp > $wav_scp
-    rm ${wav_scp}.tmp
+    find . "${db_root}" -type f -name "*.m4a" | while read -r wav_file; do
+        if [[ "$wav_file" =~ \([0-9]+\)\.m4a$ ]]; then
+            continue
+        else
+            echo -e "$id\t$wav_file" >> $wav_scp
+            id=$((id + 1))
+        fi
+    done
+
 fi
 
 # Split the $processed_metadata_root for $ngpu GPUs
@@ -46,12 +62,13 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
     for n in `seq 1 $ngpu`; do
         split_scp="$split_scp $processed_metadata_root/${ngpu}splits/wav.${n}.scp"
     done
-    ../../tools/kaldi/utils/split_scp.pl $processed_metadata_root/wav.scp.shuf $split_scp
+    utils/split_scp.pl $processed_metadata_root/wav.scp.shuf $split_scp
 fi
 
 if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
     echo "Emilia pipeline: Spk -> VAD -> ASR"
-    ../../tools/kaldi/utils/run.pl JOB=1:$ngpu  $processed_metadata_root/${ngpu}splits/log/emilia.JOB.log \
+    conda activate AudioPipeline
+    utils/run.pl JOB=1:${npgu}  $processed_metadata_root/${ngpu}splits/log/emilia.JOB.log \
     python data_scripts/emilia/main.py \
         --rank JOB \
         --input_scp $processed_metadata_root/${ngpu}splits/wav.JOB.scp \
@@ -63,28 +80,28 @@ if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
         --config_path data_scripts/emilia/config.json
 fi
 
+wait
+
 if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
     echo "Audio Tokenization"
-
-    # conda activate RSTnet
-    conda activate open-moshi
-    ../../tools/kaldi/utils/run.pl JOB=1:$ngpu $processed_metadata_root/${ngpu}splits/log/mimi.JOB.log \
+    conda activate RSTnet
+    utils/run.pl JOB=1:$ngpu $processed_metadata_root/${ngpu}splits/log/mimi.JOB.log \
         python3 data_scripts/offline_codec_tokenization.py \
             --input-file  $processed_metadata_root/${ngpu}splits/wav_seg.JOB.scp \
             --output-file  $processed_metadata_root/${ngpu}splits/audio_codec.JOB.pt \
             --tokenizer mimi --rank JOB || exit 1;
-    # conda activate AudioPipeline
 fi
 
 if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
     echo "Prepare text sequence"
-    conda activate open-moshi
-    ../../tools/kaldi/utils/run.pl JOB=1:$ngpu  $processed_metadata_root/${ngpu}splits/log/text_bpe.JOB.log \
+    conda activate RSTnet
+    # ../../tools/kaldi/utils/run.pl JOB=1:$ngpu  $processed_metadata_root/${ngpu}splits/log/text_bpe.JOB.log \
+    utils/run.pl JOB=1:$ngpu  $processed_metadata_root/${ngpu}splits/log/text_bpe.JOB.log \
     python  data_scripts/text_tokenization_utt2json.py \
         --rank JOB \
         --input-file  $processed_metadata_root/${ngpu}splits/utt2json.JOB \
         --input-audio $processed_metadata_root/${ngpu}splits/audio_codec.JOB.pt \
-        --checkpoint_dir /mnt/users/hccl.local/jkzhao/.cache/huggingface/hub/models--meta-llama--Llama-3.2-3B/snapshots/13afe5124825b4f3751f836b40dafda64c1ed062 \
+        --checkpoint_dir /mnt/file-201-user-disk-m/cpii.local/dcyang/zjk/projects/CSM/ckpts/llama-3.2-3B\
         --output-file $processed_metadata_root/${ngpu}splits/tokens.JOB.pt
 fi
 
@@ -102,11 +119,16 @@ fi
 
 if [ ${stage} -le 7 ] && [ ${stop_stage} -ge 7 ]; then
     echo "Dataloader test"
-    conda activate open-moshi
+    conda activate RSTnet
     python3 ../../utils/dataloader.py \
         --train_data_jsons $processed_metadata_root/${ngpu}splits/broadcast_data.ALL.json \
         --valid_data_jsons $processed_metadata_root/${ngpu}splits/broadcast_data.ALL.json \
         --audio_tokenizer 'mimi' \
+        --empty_token 0 \
+        --pad_token 2050 \
+        --semantic_eos 0 \
+        --text_empty_token 0 \
+        --text_pad_token 128002 \
         --parallel_number 33 \
-        --checkpoint_path /mnt/users/hccl.local/jkzhao/.cache/huggingface/hub/models--meta-llama--Llama-3.2-3B/snapshots/13afe5124825b4f3751f836b40dafda64c1ed062/lit_model.pth
+        --checkpoint_path /mnt/file-201-user-disk-m/cpii.local/dcyang/zjk/projects/CSM/ckpts/llama-3.2-3B/lit_model.pth
 fi

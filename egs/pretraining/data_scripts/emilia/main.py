@@ -16,6 +16,7 @@ import warnings
 import torch
 from pydub import AudioSegment
 from pyannote.audio import Pipeline
+import pyannote.audio
 import pandas as pd
 import whisperx
 
@@ -29,9 +30,68 @@ from utils.tool import (
 )
 from utils.logger import Logger, time_logger
 from models import separate_fast, dnsmos, whisper_asr, silero_vad
+from models.speaker_diarization import Diarization3Dspeaker
+import glob
 
 warnings.filterwarnings("ignore")
+pd.set_option('display.max_columns', None)
 audio_count = 0
+
+
+@time_logger
+def readaudio(audio_path):
+    """
+    Read the audio file and convert it to a wav.
+
+    Args:
+        audio_path (str): Path to the audio file.
+
+    Returns:
+        np.ndarray: Audio waveform as a numpy array.
+    """
+    global audio_count
+    name = "audio"
+    if audio_path.endswith(".m4a"):
+        name = os.path.basename(audio_path)
+        audio = AudioSegment.from_file(audio_path)
+        audio = audio.set_frame_rate(cfg["entrypoint"]["SAMPLE_RATE"])
+        audio = audio.set_sample_width(2)  # Set bit depth to 16bit
+        audio = audio.set_channels(1)  # Set to mono
+        waveform = np.array(audio.get_array_of_samples(), dtype=np.float32)/32768.0
+        audio = {
+            "waveform": waveform,
+            "name":name,
+            "sample_rate": cfg["entrypoint"]["SAMPLE_RATE"],
+        }
+        return audio
+    if isinstance(audio_path, str):
+        name = os.path.basename(audio_path)
+        Audio = pyannote.audio.Audio(cfg["entrypoint"]["SAMPLE_RATE"],"downmix")
+    elif isinstance(audio_path, AudioSegment):
+        name = f"audio_{audio_count}"
+        audio_count += 1
+    else:
+        raise ValueError("Invalid audio type")
+    
+    try:
+        audio,sample_rate= Audio(audio_path)
+        waveform=audio[0].numpy()
+        waveform=waveform.astype(np.float32)
+    except Exception as e:
+        logger.error(f"Error reading audio file using Pyannote: {audio_path}, {e}")
+        try:
+            # 使用 librosa 加载音频
+            waveform, sample_rate = librosa.load(audio_path, sr=cfg["entrypoint"]["SAMPLE_RATE"], mono=True)
+        except Exception as e:
+            logger.error(f"Failed to load audio using librosa: {e}")
+            raise RuntimeError(f"Unable to load audio file: {audio_path}")
+
+    return{
+        "waveform": waveform,
+        "name": name,
+        "sample_rate": sample_rate
+    }
+
 
 
 @time_logger
@@ -53,60 +113,33 @@ def standardization(audio):
     Raises:
         ValueError: If the audio parameter is neither a str nor an AudioSegment.
     """
-    global audio_count
-    name = "audio"
 
-    if isinstance(audio, str):
-        name = os.path.basename(audio)
-        audio = AudioSegment.from_file(audio)
-    elif isinstance(audio, AudioSegment):
-        name = f"audio_{audio_count}"
-        audio_count += 1
-    else:
-        raise ValueError("Invalid audio type")
-
+    t_audio=AudioSegment(
+        audio["waveform"].tobytes(),
+        frame_rate=audio["sample_rate"],
+        sample_width=audio["sample_depth"],
+        channels=audio["channels"]
+    )
     logger.debug("Entering the preprocessing of audio")
 
-    # Convert the audio file to WAV format
-    audio = audio.set_frame_rate(cfg["entrypoint"]["SAMPLE_RATE"])
-    audio = audio.set_sample_width(2)  # Set bit depth to 16bit
-    # audio = audio.set_channels(1)  # Set to mono
+    t_audio = t_audio.set_frame_rate(cfg["entrypoint"]["SAMPLE_RATE"])
+    t_audio = t_audio.set_sample_width(2)  # Set bit depth to 16bit
+    t_audio = t_audio.set_channels(1)
 
-    # Mix both channels by averaging the samples instead of only taking the first channel
-    channels = audio.split_to_mono()
-    # Convert each channel to a numpy array of samples
-    samples = [np.array(ch.get_array_of_samples(), dtype=np.int16) for ch in channels]
-    # Average the channels (axis=0) and convert back to int16
-    mixed_samples = np.sum(np.stack(samples, axis=0), axis=0).astype(np.int16)
-    # Create a new mono AudioSegment from the mixed samples
-    audio = AudioSegment(
-        mixed_samples.tobytes(),
-        frame_rate=audio.frame_rate,
-        sample_width=audio.sample_width,
-        channels=1
+    waveform = np.array(t_audio.get_array_of_samples(), dtype=np.float32)/32768.0
+    logger.debug(
+        f"for test asr > detect_language: audio max: {max(waveform)}"
+    )
+    language, prob = asr_model.detect_language(waveform)
+    logger.debug(
+        f"asr > language: {language}, prob: {prob}"
     )
 
-    logger.debug("Audio file converted to WAV format")
 
-    # Calculate the gain to be applied
-    target_dBFS = -20
-    gain = target_dBFS - audio.dBFS
-    logger.info(f"Calculating the gain needed for the audio: {gain} dB")
-
-    # Normalize volume and limit gain range to between -3 and 3
-    normalized_audio = audio.apply_gain(min(max(gain, -3), 3))
-
-    waveform = np.array(normalized_audio.get_array_of_samples(), dtype=np.float32)
-    max_amplitude = np.max(np.abs(waveform))
-    waveform /= max_amplitude  # Normalize
-
-    logger.debug(f"waveform shape: {waveform.shape}")
-    logger.debug("waveform in np ndarray, dtype=" + str(waveform.dtype))
-
-    return {
+    return{
         "waveform": waveform,
-        "name": name,
-        "sample_rate": cfg["entrypoint"]["SAMPLE_RATE"],
+        "name": audio["name"],
+        "sample_rate": audio["sample_rate"],
     }
 
 
@@ -147,7 +180,7 @@ def source_separation(predictor, audio):
 @time_logger
 def speaker_diarization(audio):
     """
-    Perform speaker diarization on the given audio.
+    Perform speaker diarization on the given audio using pyannote model.
 
     Args:
         audio (dict): A dictionary containing the audio waveform and sample rate.
@@ -156,18 +189,12 @@ def speaker_diarization(audio):
         pd.DataFrame: A dataframe containing segments with speaker labels.
     """
     logger.debug(f"Start speaker diarization")
-    logger.debug(f"audio waveform shape: {audio['waveform'].shape}")
 
-    waveform = torch.tensor(audio["waveform"]).to(device)
+    waveform=audio['waveform']
+    # waveform=waveform.astype(np.float32)
+    waveform=torch.tensor(waveform)
     waveform = torch.unsqueeze(waveform, 0)
-
-    segments = dia_pipeline(
-        {
-            "waveform": waveform,
-            "sample_rate": audio["sample_rate"],
-            "channel": 0,
-        }
-    )
+    segments = dia_pipeline({"waveform": waveform, "sample_rate": audio['sample_rate']})
 
     diarize_df = pd.DataFrame(
         segments.itertracks(yield_label=True),
@@ -177,8 +204,51 @@ def speaker_diarization(audio):
     diarize_df["end"] = diarize_df["segment"].apply(lambda x: x.end)
 
     logger.debug(f"diarize_df: {diarize_df}")
-
+    # each speaker's number of segments
+    speaker_stats = diarize_df.groupby("speaker").size()
+    logger.debug(f"speaker_stats: {speaker_stats}")
     return diarize_df
+
+
+@time_logger
+def deduplicate(speakerdia):
+    """
+    Deduplicate the speaker diarization segments by merging overlapping segments.
+
+    Args:
+        speakerdia (list): List of speaker diarization segments with start, end, and speaker labels.
+
+    Returns:
+        list: A list of deduplicated speaker diarization segments.
+    """
+    deduped_segments = []
+    last_seg=speakerdia[0]
+    for segment in speakerdia:
+        if segment["start"] >= last_seg["end"]:
+            deduped_segments.append(last_seg)
+            last_seg=segment
+            continue
+        elif segment["end"] <= last_seg["end"]:
+            continue
+        elif segment["start"] ==last_seg["start"] and segment["end"] > last_seg["end"]:
+            last_seg = segment
+        elif segment["speaker"] == last_seg["speaker"]:
+            last_seg={
+                    "start": last_seg["start"],
+                    "end": segment["end"],
+                    "speaker": last_seg["speaker"],
+                }
+        else:
+            deduped_segments.append(
+                {
+                    "start": last_seg["start"],
+                    "end": segment["start"],
+                    "speaker": last_seg["speaker"],
+                }
+            )
+            last_seg=segment
+    deduped_segments.append(last_seg)
+    return deduped_segments
 
 
 @time_logger
@@ -192,8 +262,8 @@ def cut_by_speaker_label(vad_list):
     Returns:
         list: A list of updated VAD segments after merging and trimming.
     """
-    MERGE_GAP = 2  # merge gap in seconds, if smaller than this, merge
-    MIN_SEGMENT_LENGTH = 0  # min segment length in seconds
+    MERGE_GAP = 0  # merge gap in seconds, if smaller than this, merge
+    MIN_SEGMENT_LENGTH = 2  # min segment length in seconds
     MAX_SEGMENT_LENGTH = 30  # max segment length in seconds
 
     updated_list = []
@@ -206,9 +276,6 @@ def cut_by_speaker_label(vad_list):
         if vad["end"] - vad["start"] >= MAX_SEGMENT_LENGTH:
             current_start = vad["start"]
             segment_end = vad["end"]
-            logger.warning(
-                f"cut_by_speaker_label > segment longer than 30s, force trimming to 30s smaller segments"
-            )
             while segment_end - current_start >= MAX_SEGMENT_LENGTH:
                 vad["end"] = current_start + MAX_SEGMENT_LENGTH  # update end time
                 updated_list.append(vad)
@@ -218,15 +285,16 @@ def cut_by_speaker_label(vad_list):
                 vad["end"] = segment_end
             updated_list.append(vad)
             continue
-
+        # when the vad list is empty, or the speaker is different, or the vad segment is long enough ,not to merge
         if (
-            last_speaker is None
-            or last_speaker != vad["speaker"]
-            or vad["end"] - vad["start"] >= MIN_SEGMENT_LENGTH
+            last_speaker is None #for the first vad
+            or last_speaker != vad["speaker"] # different speaker:
+            or vad["end"] - vad["start"] >= MIN_SEGMENT_LENGTH # vad segment is long enough
         ):
             updated_list.append(vad)
             continue
 
+        # the speaker is the same, if the gap is long enough ,or to be merged segments are too long ,not to merge
         if (
             vad["start"] - last_end_time >= MERGE_GAP
             or vad["end"] - last_start_time >= MAX_SEGMENT_LENGTH
@@ -235,23 +303,15 @@ def cut_by_speaker_label(vad_list):
         else:
             updated_list[-1]["end"] = vad["end"]  # merge the time
 
-    logger.debug(
-        f"cut_by_speaker_label > merged {len(vad_list) - len(updated_list)} segments"
-    )
-
     filter_list = [
         vad for vad in updated_list if vad["end"] - vad["start"] >= MIN_SEGMENT_LENGTH
     ]
-
-    logger.debug(
-        f"cut_by_speaker_label > removed: {len(updated_list) - len(filter_list)} segments by length"
-    )
 
     return filter_list
 
 
 @time_logger
-def asr(vad_segments, audio, word_level_timestamp=False):
+def asr(speaker_segment, audio, word_level_timestamp=False):
     """
     Perform Automatic Speech Recognition (ASR) on the VAD segments of the given audio.
 
@@ -262,91 +322,61 @@ def asr(vad_segments, audio, word_level_timestamp=False):
     Returns:
         list: A list of ASR results with transcriptions and language details.
     """
-    if len(vad_segments) == 0:
+    if len(speaker_segment) == 0:
         return []
-
     temp_audio = audio["waveform"]
-    start_time = vad_segments[0]["start"]
-    end_time = vad_segments[-1]["end"]
+    start_time = speaker_segment[0]["start"]
+    end_time = speaker_segment[-1]["end"]
     start_frame = int(start_time * audio["sample_rate"])
     end_frame = int(end_time * audio["sample_rate"])
     temp_audio = temp_audio[start_frame:end_frame]  # remove silent start and end
 
-    # update vad_segments start and end time (this is a little trick for batched asr:)
-    for idx, segment in enumerate(vad_segments):
-        vad_segments[idx]["start"] -= start_time
-        vad_segments[idx]["end"] -= start_time
+    # update speaker_segment start and end time (this is a little trick for batched asr:)
+    for idx, segment in enumerate(speaker_segment):
+        speaker_segment[idx]["start"] -= start_time
+        speaker_segment[idx]["end"] -= start_time
 
-    # resample to 16k
-    temp_audio = librosa.resample(
-        temp_audio, orig_sr=audio["sample_rate"], target_sr=16000
-    )
 
     if multilingual_flag:
         logger.debug("Multilingual flag is on")
-        valid_vad_segments, valid_vad_segments_language = [], []
-        # get valid segments to be transcripted
-        for idx, segment in enumerate(vad_segments):
-            start_frame = int(segment["start"] * 16000)
-            end_frame = int(segment["end"] * 16000)
-            segment_audio = temp_audio[start_frame:end_frame]
-            language, prob = asr_model.detect_language(segment_audio)
-            # 1. if language is in supported list, 2. if prob > 0.8
-            if language in supported_languages and prob > 0.8:
-                valid_vad_segments.append(vad_segments[idx])
-                valid_vad_segments_language.append(language)
-
-        # if no valid segment, return empty
-        if len(valid_vad_segments) == 0:
-            return []
+        language, prob = asr_model.detect_language(temp_audio)
         all_transcribe_result = []
-        logger.debug(f"valid_vad_segments_language: {valid_vad_segments_language}")
-        unique_languages = list(set(valid_vad_segments_language))
-        logger.debug(f"unique_languages: {unique_languages}")
-        # process each language one by one
-        for language_token in unique_languages:
-            language = language_token
-            # filter out segments with different language
-            vad_segments = [
-                valid_vad_segments[i]
-                for i, x in enumerate(valid_vad_segments_language)
-                if x == language
-            ]
-            # bacthed trascription
-            transcribe_result_temp = asr_model.transcribe(
-                temp_audio,
-                vad_segments,
-                batch_size=batch_size,
-                language=language,
-                print_progress=True,
-            )
-            if word_level_timestamp:
-                if language not in alignment_models:
-                    alignment_models[language] = whisperx.load_align_model(language_code=language, device=device)
-                model_a, metadata = alignment_models[language]
-                result = whisperx.align(transcribe_result_temp["segments"], model_a, metadata, temp_audio, device, return_char_alignments=False)
-                result = result["segments"]
-                import pdb; pdb.set_trace()
-                for idx, segment in enumerate(result):
-                    result[idx]["start"] += start_time
-                    result[idx]["end"] += start_time
-                    result[idx]["language"] = transcribe_result_temp["language"]
-                    # TODO: align后会重新进行一次分割，需要贪心对齐一下来恢复speaker信息
-                    # result[idx]["speaker"] = transcribe_result_temp["segments"][idx]["speaker"]
-                    for word_idx, word in enumerate(segment["words"]):
-                        result[idx]["words"][word_idx]["start"] += start_time
-                        result[idx]["words"][word_idx]["end"] += start_time
-                all_transcribe_result.extend(result)
-            else:
-                result = transcribe_result_temp["segments"]
-                # restore the segment annotation
-                for idx, segment in enumerate(result):
-                    result[idx]["start"] += start_time
-                    result[idx]["end"] += start_time
-                    result[idx]["language"] = transcribe_result_temp["language"]
-                all_transcribe_result.extend(result)
+        transcribe_result_temp = asr_model.transcribe(
+            temp_audio,
+            speaker_segment,
+            batch_size=batch_size,
+            language=language,
+            print_progress=False,
+        )
+        if word_level_timestamp:
+            if language not in alignment_models:
+                alignment_models[language] = whisperx.load_align_model(language_code=language, device=device)
+            model_a, metadata = alignment_models[language]
+            result = whisperx.align(transcribe_result_temp["segments"], model_a, metadata, temp_audio, device, return_char_alignments=False)
+            result = result["segments"]
+            import pdb; pdb.set_trace()
+            for idx, segment in enumerate(result):
+                result[idx]["start"] += start_time
+                result[idx]["end"] += start_time
+                result[idx]["language"] = transcribe_result_temp["language"]
+                # TODO: align后会重新进行一次分割，需要贪心对齐一下来恢复speaker信息
+                # result[idx]["speaker"] = transcribe_result_temp["segments"][idx]["speaker"]
+                for word_idx, word in enumerate(segment["words"]):
+                    result[idx]["words"][word_idx]["start"] += start_time
+                    result[idx]["words"][word_idx]["end"] += start_time
+            all_transcribe_result.extend(result)
+        else:
+            result = transcribe_result_temp["segments"]
+            # restore the segment annotation
+            for idx, segment in enumerate(result):
+                result[idx]["start"] += start_time
+                result[idx]["end"] += start_time
+                result[idx]["language"] = transcribe_result_temp["language"]
+            all_transcribe_result.extend(result)
         # sort by start time
         all_transcribe_result = sorted(all_transcribe_result, key=lambda x: x["start"])
+        # reprocess the missing setences
+
         return all_transcribe_result
     else:
         logger.debug("Multilingual flag is off")
@@ -354,15 +384,14 @@ def asr(vad_segments, audio, word_level_timestamp=False):
         if language in supported_languages and prob > 0.8:
             transcribe_result = asr_model.transcribe(
                 temp_audio,
-                vad_segments,
+                speaker_segment,
                 batch_size=batch_size,
                 language=language,
-                print_progress=True,
+                print_progress=False,
             )
+            
             result = transcribe_result["segments"]
             for idx, segment in enumerate(result):
-                result[idx]["start"] += start_time
-                result[idx]["end"] += start_time
                 result[idx]["language"] = transcribe_result["language"]
             return result
         else:
@@ -425,8 +454,8 @@ def filter(mos_list):
 def merge_segments(
         segments_list, 
         chunk_size, 
-        blank_threshold = 3.0,
-        length_threshold = 3.0,
+        blank_threshold = 3,
+        length_threshold = 3,
         ):
     """
     Merge operation described in paper
@@ -436,7 +465,8 @@ def merge_segments(
     seg_idxs = []
 
     assert chunk_size > 0
-
+    if segments_list is None or len(segments_list) == 0:
+        return merged_segments
     # Make sure the starting point is the start of the segment.
     curr_start = segments_list[0]["start"]
 
@@ -451,7 +481,6 @@ def merge_segments(
                     "end": curr_end,
                     "segments": seg_idxs,
                 })
-            
             curr_start = seg["start"]
             seg_idxs = []
         # Add segment to current section
@@ -492,37 +521,51 @@ def main_process(audio_path, save_path=None, audio_name=None):
     logger.debug(
         f"Processing audio: {audio_name}, from {audio_path}, save to: {save_path}"
     )
+    audio_dir=os.path.dirname(audio_path)
+    dirs=audio_dir.split('/')
+    audio_name=dirs[-1]+audio_name
+    # If the audio has already been processed, skip it
+    # Check if pre-processed files already exist
+    pattern = os.path.join(save_path, "audio", f"{audio_name}_*.mp3")
+    existing_audio_files = glob.glob(pattern)
+    if existing_audio_files:
+        utt2wav = {}
+        utt2json = {}
+        for audio_file in existing_audio_files:
+            uttid = os.path.splitext(os.path.basename(audio_file))[0]
+            utt2wav[uttid] = audio_file
+
+            metadata_file = os.path.join(save_path, "metadata", f"{uttid}.json")
+            if os.path.exists(metadata_file):
+                utt2json[uttid] = metadata_file
+
+        logger.info(f"Found pre-processed files for {audio_path}; skipping processing.")
+        return utt2wav, utt2json
 
     logger.info(
-        "Step 0: Preprocess all audio files --> 24k sample rate + wave format + loudnorm + bit depth 16"
+        "Step 1: Preprocess all audio files --> 24k sample rate + wave format + loudnorm + bit depth 16"
     )
-    audio = standardization(audio_path)
 
-    # logger.info("Step 1: Source Separation")
-    # audio = source_separation(separate_predictor1, audio)
+    audio = readaudio(audio_path)
 
     logger.info("Step 2: Speaker Diarization")
     speakerdia = speaker_diarization(audio)
+    # transform dataframe speakerdia to List[dict]
+    speakerdia = [
+        {
+            "start": row["start"],
+            "end": row["end"],
+            "speaker": row["speaker"],
+        }
+        for index, row in speakerdia.iterrows()
+    ]
 
-    logger.info("Step 3: Fine-grained Segmentation by VAD")
-    vad_list = vad.vad(speakerdia, audio)
-    segment_list = cut_by_speaker_label(vad_list)  # post process after vad
-
-    logger.info("Step 4: ASR")
-    asr_result = asr(segment_list, audio, word_level_timestamp=args.word_level_timestamp)
-
-    # logger.info("Step 5: Filter")
-    # logger.info("Step 5.1: calculate mos_prediction")
-    # avg_mos, mos_list = mos_prediction(audio, asr_result)
-
-    # logger.info(f"Step 5.1: done, average MOS: {avg_mos}")
-
-    # logger.info("Step 5.2: Filter out files with less than average MOS")
-    # filtered_list = filter(mos_list)
+    logger.info("Step 3: ASR")
+    asr_result = asr(speakerdia, audio, word_level_timestamp=args.word_level_timestamp)
 
     filtered_list = merge_segments(asr_result, chunk_size=args.max_duration)
 
-    logger.info("Step 6: write result into MP3 and JSON file")
+    logger.info("Step 4: write result into MP3 and JSON file")
     utt2wav, utt2json = export_to_mp3(audio, filtered_list, save_path, audio_name)
 
     return utt2wav, utt2json
@@ -641,23 +684,28 @@ if __name__ == "__main__":
 
     # Speaker Diarization
     logger.debug(" * Loading Speaker Diarization Model")
-    # if not cfg["huggingface_token"].startswith("hf"):
-    #     raise ValueError(
-    #         "huggingface_token must start with 'hf', check the config file. "
-    #         "You can get the token at https://huggingface.co/settings/tokens. "
-    #         "Remeber grant access following https://github.com/pyannote/pyannote-audio?tab=readme-ov-file#tldr"
-    #     )
+    if not cfg["huggingface_token"].startswith("hf"):
+        raise ValueError(
+            "huggingface_token must start with 'hf', check the config file. "
+            "You can get the token at https://huggingface.co/settings/tokens. "
+            "Remeber grant access following https://github.com/pyannote/pyannote-audio?tab=readme-ov-file#tldr"
+        )
     dia_pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-3.1",
-        # use_auth_token=cfg["huggingface_token"],
+        use_auth_token=cfg["huggingface_token"],
     )
     dia_pipeline.to(device)
 
+    # Use camplus for speaker diarization
+    # TODO: Enable overlap
+    # diarization = Diarization3Dspeaker(device, include_overlap=True, hf_access_token=cfg["huggingface_token"])
+
     # ASR
     logger.debug(" * Loading ASR Model")
-    asr_model = whisper_asr.load_asr_model(
+    asr_model = whisper_asr.load_model(
         args.whisper_arch,
         device_name,
+        device_index=rank,
         compute_type=args.compute_type,
         threads=args.threads,
         asr_options={
@@ -670,7 +718,8 @@ if __name__ == "__main__":
 
     # VAD
     logger.debug(" * Loading VAD Model")
-    vad = silero_vad.SileroVAD(device=device)
+    # vad = silero_vad.SileroVAD(device=device)
+    vad=None
 
     # Background Noise Separation
     logger.debug(" * Loading Background Noise Model")
@@ -699,8 +748,10 @@ if __name__ == "__main__":
         audio_paths = []
         with open(args.input_scp) as f:
             for line in f:
-                audio_path = line.split()[-1]
-                audio_paths.append(os.path.join(input_folder_path, audio_path))
+                line = line.strip()
+                audio_path = line.split('\t')[-1]
+                audio_paths.append(audio_path)
+                # audio_paths.append(os.path.join(input_folder_path, audio_path))
     else:
         audio_paths = get_audio_files(input_folder_path)  # Get all audio files
     logger.debug(f"Scanning {len(audio_paths)} audio files in {input_folder_path}")
@@ -714,9 +765,9 @@ if __name__ == "__main__":
     if args.output_scp:
         with open(args.output_scp, "w") as f:
             for k, v in utt2wav.items():
-                f.write(f"{k} {v}\n")
+                f.write(f"{k}\t{v}\n")
 
     if args.output_utt2json:
         with open(args.output_utt2json, "w") as f:
             for k, v in utt2json.items():
-                f.write(f"{k} {v}\n")
+                f.write(f"{k}\t{v}\n")
