@@ -29,7 +29,7 @@ Please refer to the following documents to prepare the data, train the model, an
 ## Main Contributors
 
 - [Dongchao Yang]
-- [Dading Cong]
+- [Dading Chong]
 - [Jiankun Zhao]
 - [Yuanyuan Wang]
 - [Helin Wang]
